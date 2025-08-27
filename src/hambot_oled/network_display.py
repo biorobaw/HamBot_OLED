@@ -1,88 +1,68 @@
-import subprocess
-from typing import Optional, Tuple
-
 import board
 import digitalio
 from PIL import Image, ImageDraw, ImageFont
 import adafruit_ssd1306
+import subprocess
 
+# OLED setup
+oled = adafruit_ssd1306.SSD1306_I2C(128, 32, board.I2C(), addr=0x3C, reset=digitalio.DigitalInOut(board.D4))
+font = ImageFont.load_default()
 
-def _get_ip_for_interface(interface: str) -> str:
+def get_ip_for_interface(interface):
     try:
-        output = subprocess.check_output(
-            ["ip", "-4", "addr", "show", interface],
-            text=True
-        )
+        output = subprocess.check_output(f"ip -4 addr show {interface}", shell=True).decode()
         for line in output.splitlines():
             line = line.strip()
             if line.startswith("inet "):
-                return line.split()[1].split("/")[0]
-    except Exception:
-        pass
+                return line.split()[1].split('/')[0]
+    except Exception as e:
+        print(f"IP fetch failed for {interface}:", e)
     return "No IP"
 
-
-def _active_wifi_ssid() -> Optional[str]:
-    # Returns SSID if connected as a Wi-Fi client; else None
+def get_ap_ssid_via_nmcli():
     try:
-        ssid = subprocess.check_output(["iwgetid", "-r"], text=True).strip()
-        return ssid or None
-    except subprocess.CalledProcessError:
-        return None
-
-
-def _active_ap_ssid_via_nmcli() -> Optional[str]:
-    # If broadcasting an AP via NetworkManager, returns SSID; else None
-    try:
-        output = subprocess.check_output(
-            ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
-            text=True
-        )
-        for line in output.splitlines():
-            if not line.strip():
-                continue
-            name, ctype = line.split(":", 1)
-            if ctype == "802-11-wireless":
+        output = subprocess.check_output("nmcli -t -f NAME,TYPE connection show --active", shell=True).decode()
+        for line in output.strip().split("\n"):
+            name, conn_type = line.strip().split(":")
+            if conn_type == "802-11-wireless":
                 return name
-    except Exception:
-        pass
+    except Exception as e:
+        print("AP mode detection failed:", e)
     return None
 
+def get_display_info():
+    # Rule 1: Connected to a Wi-Fi network as client
+    try:
+        ssid = subprocess.check_output("iwgetid -r", shell=True).decode().strip()
+        if ssid:
+            return "WiFi", ssid, get_ip_for_interface("wlan0")
+    except subprocess.CalledProcessError:
+        pass
 
-def get_display_triplet(prefer_interface: str = "wlan0") -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    Returns (mode, ssid, ip) or (None, None, None) if nothing to show.
-    mode ∈ {"WiFi", "AP"}.
-    """
-    ssid = _active_wifi_ssid()
-    if ssid:
-        return "WiFi", ssid, _get_ip_for_interface(prefer_interface)
-
-    ap_ssid = _active_ap_ssid_via_nmcli()
+    # Rule 2: Broadcasting an AP
+    ap_ssid = get_ap_ssid_via_nmcli()
     if ap_ssid:
-        return "AP", ap_ssid, _get_ip_for_interface(prefer_interface)
+        return "AP", ap_ssid, get_ip_for_interface("wlan0")
 
     return None, None, None
 
+def display_lines(lines):
+    oled.fill(0)
+    img = Image.new("1", (oled.width, oled.height))
+    draw = ImageDraw.Draw(img)
+    for i, text in enumerate(lines[:3]):
+        draw.text((0, i * 10), text, font=font, fill=255)
+    oled.image(img)
+    oled.show()
 
-class OledScreen:
-    def __init__(self, width: int = 128, height: int = 32, addr: int = 0x3C, reset_pin=board.D4, font_path: Optional[str] = None):
-        i2c = board.I2C()
-        reset = digitalio.DigitalInOut(reset_pin)
-        self._oled = adafruit_ssd1306.SSD1306_I2C(width, height, i2c, addr=addr, reset=reset)
-        self._oled.fill(0)
-        self._oled.show()
-        self.width, self.height = width, height
-        self.font = ImageFont.load_default() if font_path is None else ImageFont.truetype(font_path, 12)
-
-    def show_lines(self, lines):
-        img = Image.new("1", (self.width, self.height))
-        draw = ImageDraw.Draw(img)
-        for i, text in enumerate(lines[:3]):
-            draw.text((0, i * 10), text, font=self.font, fill=255)
-        self._oled.image(img)
-        self._oled.show()
-
-    def clear(self):
-        self._oled.fill(0)
-        self._oled.show()
+if __name__ == "__main__":
+    mode, ssid, ip = get_display_info()
+    if mode and ssid and ip:
+        display_lines([
+            f"Mode: {mode}",
+            f"SSID: {ssid}",
+            f"IP: {ip}"
+        ])
+    else:
+        oled.fill(0)
+        oled.show()
